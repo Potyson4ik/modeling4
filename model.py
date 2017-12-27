@@ -1,156 +1,162 @@
-import random
 
 
 class Task:
-    def __init__(self, current_time, stream_number):
+    def __init__(self, time, stream_number):
+        self.time = time
+        self.time_left = None
+        self.runtime = 0
         self.stream_number = stream_number
-        self.is_used = False
-        self.runtime = 0  # Время обработки задачи
-        self.wait_time = 0  # Время ожидания задачи в очереди
-        self.time = current_time  # Системное время
-        self.is_run = False  # True - задача в данный момент обрабатывается севером
 
-    # Метод возвращает время обработки задачи на сервере
-    def get_total_time(self):
-        return self.runtime + self.wait_time
-
-    # Метод запускает выполнение задачи
-    def run_task(self, time):
-        self.is_used = True
-        self.wait_time += time - self.time
+    def start(self, time, runtime):
+        self.time_left = runtime
         self.time = time
-        self.is_run = True
-        return self.runtime
 
-    # Метод останавливает выполнение задачи
-    def stop_task(self, time):
-        self.runtime += time - self.time
+    def pause(self, time):
+        dif_time = time - self.time
+        self.runtime = dif_time
+        self.time_left -= dif_time
         self.time = time
-        self.task_run = False
+
+    def stop(self, time):
+        self.time = time
+        self.runtime += self.time_left
+        self.time_left = 0
 
 
 class Stream:
-    def __init__(self, priority, generator, generator_param):
-        self.priority = priority  # Приоритет потока
-        self.server_generator = generator  # Генератор времени обработки задачи сервером
-        self.server_generator_param = generator_param # Входные параметры для генератора
-        self.queue = []  # Очередь задач в потоке
-        self.time = 0  # Время работы потока
-        self.wait_time = 0  # Время бездействия потока
-        self.added_task = 0  # Количество принтых потоком задач
+    def __init__(self, priority):
+        self.priority = priority
+        self.queue = []
+        self.time = 0
+        self.input_task_counter = 0
+        self.sum_task_runtime = 0
+        self.completed_task_counter = 0
+
 
     def add_task(self, task):
-        pass
+        self.queue.append(task)
+        if task.time_left is None:
+            self.input_task_counter += 1
 
+    def get_task(self):
+        return self.queue.pop(0) if len(self.queue) > 0 else None
 
+    def update_priority(self, task_runtime):
+        self.sum_task_runtime += task_runtime
+        self.completed_task_counter += 1
+        if self.completed_task_counter > 10:
+            self.priority = self.sum_task_runtime / self.completed_task_counter
 
 
 class Server:
-    def __init__(self, generators_param, generators, stream_config):
-        self.streams = {}  # Потоки
-        self.generators = generators  # Генераторы времён обработки ресурсов
-        self.generators_param = generators_param  # Входные параметры для генераторов
-        self.time = 0  # Время работы сервера
-        self.output_tasks = []  # Список завершенных задач
-        # Инициализация потоков по заданной конфигурации
-        for key, priority in stream_config.items():
-            self.streams[key] = Stream(priority, generators[key], generators_param[key])
+    def __init__(self, server_generators, server_generator_params, stream_config):
+        self.time = 0
+        self.busy = False
+        self.task = None
+        self.output_task = []
+        self.streams = {}
+        self.server_generators = server_generators
+        self.server_generator_params = server_generator_params
+        for number, priority in stream_config.items():
+            self.streams[number] = Stream(priority)
 
-    # Метод добавляет задачу на сервер
-    def add_task(self, task):
-        self.streams[task.stream_number].add_task(task)
+    def add_task(self, task, stream_number):
+        if len(self.streams[stream_number].queue) == 0:
+            if self.busy and self.streams[stream_number].priority > self.streams[stream_number].priority:
+                self.task.pause(task.time)
+                self.time = task.time
+                self.streams[task.stream_number].add_task(self.task)
+                self.task = None
+                self.busy = False
+            if not self.busy:
+                task.start(self.time, self.server_generators[stream_number](*self.server_generator_params[stream_number]))
+                self.task = task
+                self.time += task.runtime
+                self.busy = True
+        else:
+            self.streams[stream_number].add_task(task)
 
-    # Метод возвращает индекс модуля, вида - (<тип ресурса>, <номер модуля в списке>)
-    def _get_module_index_by_nearest_event(self):
-        min_module_time = None
-        module_index = None
-        for key, module_list in self.modules.items():
-            for i in range(len(module_list)):
-                module = module_list[i]
-                if (min_module_time is None or module.time < min_module_time) and module.time > 0 and module.busy:
-                    min_module_time = module.time
-                    module_index = (key, i)
-        return module_index
+    def get_stream_number_with_high_priority(self, stream_numbers=None):
+        high_priority = None
+        number_stream_with_high_priority = None
+        if stream_numbers is None:
+            stream_numbers = self.streams.keys()
 
-    # Метод возвращает время ближайшего события на сервере
-    def get_nearest_event_time(self):
-        min_module_time = None
-        for module_list in self.modules.values():
-            for module in module_list:
-                if (min_module_time is None or module.time < min_module_time) and module.time > 0 and module.busy:
-                    min_module_time = module.time
-        return min_module_time
+        for number in stream_numbers:
+            stream = self.streams[number]
+            if high_priority is None or stream.priority > high_priority:
+                high_priority = stream.priority
+                number_stream_with_high_priority = number
+        return number_stream_with_high_priority
 
-    # Метод выполняет следующее событие
-    def next_event(self):
-        key, index = self._get_module_index_by_nearest_event()
-        task = self.modules[key][index].next_task()
-        if task is not None:
-            if task.get_next_resource() is not None:
-                module_index = None
-                min_queue_size = None
-                next_resource = task.get_next_resource()
-                for i in range(len(self.modules[next_resource])):
-                    module = self.modules[next_resource][i]
-                    if not module.busy:
-                        module_index = i
-                        break
-                    if min_queue_size is None or min_queue_size > len(module.queue):
-                        module_index = i
-                        min_queue_size = len(module.queue)
-                self.modules[next_resource][module_index].add_task(task)
-            else:
-                self.output_tasks.append(task)
+
+    def get_stream_numbers_by_time(self, time):
+        stream_numbers = []
+        for number, stream in self.streams.items():
+            if stream.time == time:
+                stream_numbers.append(number)
+        return stream_numbers
+
+    def get_nearest_stream_time(self):
+        min_stream_time = None
+        for stream in self.streams.values():
+            if (min_stream_time is None or min_stream_time > stream.time):
+                min_stream_time = stream.time
+        return min_stream_time
+
+    def get_nearest_stream_with_task_time(self):
+        min_stream_time = None
+        for stream in self.streams.values():
+            if len(stream.queue) > 0 and (min_stream_time is None or min_stream_time > stream.time):
+                min_stream_time = stream.time
+        return min_stream_time
+
+    def next_task(self):
+        if self.busy:
+            self.busy = False
+            self.task.stop(self.time)
+            self.streams[self.task.stream_number].update_priority(self.task.runtime)
+            self.output_task.append(self.task)
+            self.task = None
+        nearest_stream_time = self.get_nearest_stream_with_task_time()
+        if nearest_stream_time is not None:
+            stream_numbers = self.get_stream_numbers_by_time(nearest_stream_time)
+            stream_number = self.get_stream_number_with_high_priority(stream_numbers)
+            task = self.streams[stream_number].get_task()
+            task.start(self.time, self.server_generators[stream_number](*self.server_generator_params[stream_number]))
+            self.task = task
+            self.time += self.task.runtime
 
 
 class Model:
-    def __init__(self, runtime, task_package, module_gen, module_gen_params, task_gen, task_gen_params, module_config):
-        self.server = Server(module_gen_params, module_gen, module_config)
-        self.task_generator = task_gen
-        self.task_generator_params = task_gen_params
-        self.task_package = task_package
+    def __init__(self, runtime,
+                 task_generators, task_generator_params,
+                 server_generators, server_generator_params,
+                 stream_config):
         self.runtime = runtime
+        self.server = Server(server_generators, server_generator_params, stream_config)
+        self.system_time = 0
+        self.task_time = 0
+        self.task_generators = task_generators
+        self.task_generator_params = task_generator_params
 
     def start(self):
-        system_time = 0
-        task_time = self.task_generator(*self.task_generator_params)
-        system_time = task_time
-        task = Task(self.task_package[:], task_time, task_time)
-        task_counter = 1
-        while system_time is None or system_time < self.runtime:
-            if system_time is None or system_time >= task_time:
-                self.server.add_task(task)
-                g_time = self.task_generator(*self.task_generator_params)
-                task_time += g_time
-                task = Task(self.task_package[:], task_time, g_time)
-                task_counter += 1
+        self.system_time = 0
+        for number, stream in self.server.streams.items():
+            task_time = self.task_generators[number](*self.task_generator_params[number])
+            task = Task(task_time, number)
+            stream.add_task(task)
+            stream.time
+            if task_time < self.task_time or self.task_time == 0:
+                self.task_time = task_time
+        while self.system_time <= self.runtime:
+            if self.system_time >= self.task_time:
+                stream_numbers = self.server.get_stream_numbers_by_time(self.task_time)
+                for stream_number in stream_numbers:
+                    task = Task(self.task_generators[stream_number](*self.task_generator_params[stream_number]),
+                                stream_number)
+                    self.server.add_task(task, stream_number)
             else:
-                self.server.next_event()
-            system_time = self.server.get_nearest_event_time()
-
-        print('Задачи принятые сервером - ', task_counter)
-        print('Обработано задач - ', len(self.server.output_tasks))
-        info = """
-    Модуль: тип ресурса - {}, номер - {};
-        Выполнено задач: {};
-        Задачи оставшиеся в очереди: {};
-        Общее время обработки ресурсов: {:.3f};
-        Среднее время обработки ресурса: {:.3f};
-        Время ожидания новых ресурсов: {:.3f};
-        Среднее время ожидания ресурса: {:.3f};
-        Максимальное время ожидания ресурса: {:.3f};
-        Среднее время поступления ресурсов: {:.3f}
-        Загруженность модуля: {:.5f}"""
-        for resource, modules in self.server.modules.items():
-            for number, module in enumerate(modules):
-                print(info.format(resource, number,
-                                  module.completed_task_counter,
-                                  len(module.queue),
-                                  sum(module.module_time_list),
-                                  module.get_avg_module_time(),
-                                  module.wait_time,
-                                  module.wait_time / len(module.wait_time_list),
-                                  max(module.wait_time_list),
-                                  module.get_avg_task_time(),
-                                  module.get_load()))
-            print()
+                self.server.next_task()
+            self.task_time = self.server.get_nearest_stream_time()
+            self.system_time = self.server.time
