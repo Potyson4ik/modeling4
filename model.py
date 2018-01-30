@@ -34,6 +34,8 @@ class Stream:
         self.input_task_counter = 0  # Количество поступивших задач
         self.sum_task_runtime = 0  # Сумма времен обработки задач
         self.completed_task_counter = 0  # Количество обработанных задач
+        self.hist_priority = []  # Список приоритетов, которые устанавливались потоку
+        self.hist_runtime = []  # Список времен, в течение которых задача находилась на сервере
 
     # Метод добавляет задачу в очередь потока
     def add_task(self, task):
@@ -45,10 +47,16 @@ class Stream:
     def get_task(self):
         return self.queue.pop(0) if len(self.queue) > 0 else None
 
+    # Метод возвращает мат. ожидание значения приоритета
+    def get_M(self):
+        return sum(self.hist_priority)/len(self.hist_priority)
+
     # Обновление приоритета потока
     def update_priority(self, task_runtime):
         self.sum_task_runtime += task_runtime
         self.completed_task_counter += 1
+        self.hist_runtime.append(task_runtime)
+        self.hist_priority.append(self.priority)
         if self.completed_task_counter > 10:
             self.priority = self.sum_task_runtime / self.completed_task_counter
 
@@ -62,7 +70,7 @@ class Server:
         self.streams = {}  # Потоки
         self.server_generators = server_generators  # Генераторы обработки задач
         self.server_generator_params = server_generator_params  # Параметры для генераторов
-        # self.input_task_list = []
+        self.hist_task_start_time = []  # Список времен, в которые задача была запущена на сервере
         for number, priority in stream_config.items():
             self.streams[number] = Stream(priority)
 
@@ -73,11 +81,10 @@ class Server:
             self.next_task()
 
     # Метод возвращяет номер не пустого потока с наивысшим приоритетом
-    def get_high_priority_stream_number(self, stream_numbers=None):
+    def _get_high_priority_stream_number(self):
         high_priority = None
         h_stream_number = None
-        if stream_numbers is None:
-            stream_numbers = self.streams.keys()
+        stream_numbers = self.streams.keys()
 
         for number in stream_numbers:
             stream = self.streams[number]
@@ -90,16 +97,8 @@ class Server:
                     h_stream_number = number
         return h_stream_number
 
-    # Метод возвращает номера потоков, время поступления заданий в которые равно time
-    def get_stream_numbers_by_time(self, time):
-        stream_numbers = []
-        for number, stream in self.streams.items():
-            if stream.time == time:
-                stream_numbers.append(number)
-        return stream_numbers
-
     # Метод возвращает ближайшее время поступления задачи в поток
-    def get_nearest_stream_time(self):
+    def _get_nearest_stream_time(self):
         min_stream_time = None
         for stream in self.streams.values():
             if len(stream.queue) == 1 and (min_stream_time is None or min_stream_time > stream.time):
@@ -109,7 +108,7 @@ class Server:
     # Метод выполняет переход сервера с текущей задачи на следующую
     def next_task(self):
         nearest_stream_time = self.get_nearest_stream_time()
-        h_stream_number = self.get_high_priority_stream_number()
+        h_stream_number = self._get_high_priority_stream_number()
         if self.busy:
             if nearest_stream_time\
                 and self.streams[h_stream_number].priority > self.streams[self.task.stream_number].priority:
@@ -120,12 +119,13 @@ class Server:
                 # Завершение текущей задачи
                 self.busy = False
                 self.task.stop(self.time)
-                self.streams[self.task.stream_number].update_priority(self.task.runtime)
+                self.streams[self.task.stream_number].update_priority(self.task.runtime + self.task.wait_time)
                 self.output_task.append(self.task)
                 self.task = None
         if h_stream_number:
             # Запуск новой задачи
             self.task = self.streams[h_stream_number].get_task()
+            self.hist_task_start_time.append(self.task.time - self.time)
             self.time = self.task.time
             runtime = self.server_generators[h_stream_number](*self.server_generator_params[h_stream_number])
             self.task.start(self.time, runtime)
@@ -146,6 +146,7 @@ class Model:
         self.task_generators = task_generators  # Генератор времени поступления задачи в поток
         self.task_generator_params = task_generator_params  # Параметры для генератора времен поступающих задач
         self.task_counter = 0  # Количество задач поступивших на потоки сервера
+        self.task_times_hist = {}  # Список промежутков времени между задачами для каждого потока
 
     # Метод возвращает потоки, время следующей задачи для которых равно time
     def _get_stream_numbers_by_time(self, time):
@@ -169,13 +170,16 @@ class Model:
         for number in self.server.streams.keys():
             task_time = self.task_generators[number](*self.task_generator_params[number])
             self.task_times[number] = task_time
+            self.task_times_hist[number] = [task_time]
             if task_time < self.task_time or self.task_time == 0:
                 self.task_time = task_time
         self.stream_numbers = self._get_stream_numbers_by_time(self.task_time)
         for number in self.stream_numbers:
             self.task_counter += 1
             self.server.add_task(Task(self.task_time, number), number)
-            self.task_times[number] += self.task_generators[number](*self.task_generator_params[number])
+            time = self.task_generators[number](*self.task_generator_params[number])
+            self.task_times[number] += time
+            self.task_times_hist[number].append(time)
         self.server.next_task()
         # запуск цикла работы сервера
         while self.server.time <= self.runtime:
@@ -186,7 +190,9 @@ class Model:
                 for number in self.stream_numbers:
                     self.task_counter += 1
                     self.server.add_task(Task(self.task_time, number), number)
-                    self.task_times[number] += self.task_generators[number](*self.task_generator_params[number])
+                    time = self.task_generators[number](*self.task_generator_params[number])
+                    self.task_times[number] += time
+                    self.task_times_hist[number].append(time)
             else:
                 if not self.server.busy:
                     self.task_counter += 1
@@ -194,8 +200,19 @@ class Model:
                     self.stream_numbers = self._get_stream_numbers_by_time(self.task_time)
                     for number in self.stream_numbers:
                         self.server.add_task(Task(self.task_time, number), number)
-                        self.task_times[number] += self.task_generators[number](*self.task_generator_params[number])
+                        time = self.task_generators[number](*self.task_generator_params[number])
+                        self.task_times[number] += time
+                        self.task_times_hist[number].append(time)
                 self.server.next_task()
-        print('total tasks:',self.task_counter)
+
+    # Метод выводит информацию по результату работы модели
+    def print_info(self):
+        print('Общее количество задач, поступивших на сервер:', self.task_counter)
         for key, sv in self.server.streams.items():
-            print(key, ':', sv.priority, sv.input_task_counter, sv.completed_task_counter)
+            print("Поток", key, ':',
+                  '\n\tПриоритет:', sv.priority,
+                  '\n\tКоличество поступивших задач:', sv.input_task_counter,
+                  '\n\tКоличетво обработанных задач:', sv.completed_task_counter,
+                  '\n\tМат. ожидание приоритета:', sv.get_M(),
+                  '\n\tСредний интервал времени между задачами:', sum(self.task_times_hist[key])/len(self.task_times_hist[key]),
+                  '\n\tСреднее время обработки задачи сервером (ожидание+обработка):', sum(sv.hist_runtime) / len(sv.hist_runtime))
